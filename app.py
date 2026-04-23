@@ -1,17 +1,14 @@
 """
 Dashboard de leilões da Caixa Econômica Federal.
-
-Run local: streamlit run app.py
+Versão sem mapa interativo (substituído por agregação por cidade).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import folium
 import pandas as pd
 import streamlit as st
-from streamlit_folium import st_folium
 
 DATA_FILE = Path(__file__).parent / "data" / "imoveis.parquet"
 
@@ -23,38 +20,30 @@ st.set_page_config(
 )
 
 
-# ---------- Carregamento de dados (cached) -----------------------------------
-
 @st.cache_data(ttl=3600)
 def load_data() -> pd.DataFrame:
     if not DATA_FILE.exists():
         return pd.DataFrame()
-    df = pd.read_parquet(DATA_FILE)
-    # Colunas que podem não existir se o scraper ainda não correu o geocoder
-    for col in ["lat", "lon"]:
-        if col not in df.columns:
-            df[col] = None
-    return df
+    return pd.read_parquet(DATA_FILE)
 
 
 df = load_data()
 
 if df.empty:
     st.error(
-        "Não há dados ainda. Corre primeiro:\n\n"
-        "```\npython scraper.py\npython geocoder.py\n```"
+        "Não há dados ainda. Coloca CSVs na pasta `uploads/` e corre:\n\n"
+        "```\npython process_local.py\n```"
     )
     st.stop()
 
 
-# ---------- Sidebar: filtros -------------------------------------------------
+# ---------- Sidebar ----------------------------------------------------------
 
 st.sidebar.title("🔍 Filtros")
 
 ufs_disponiveis = sorted(df["uf"].dropna().unique().tolist())
-ufs = st.sidebar.multiselect("Estado (UF)", ufs_disponiveis, default=[])
+ufs = st.sidebar.multiselect("Estado (UF)", ufs_disponiveis, default=ufs_disponiveis)
 
-# Cidade depende da UF selecionada
 if ufs:
     cidades_disponiveis = sorted(df[df["uf"].isin(ufs)]["cidade"].dropna().unique().tolist())
 else:
@@ -65,26 +54,25 @@ cidades = st.sidebar.multiselect("Cidade", cidades_disponiveis, default=[])
 tipos_disponiveis = sorted(df["tipo_imovel"].dropna().unique().tolist())
 tipos = st.sidebar.multiselect("Tipo de imóvel", tipos_disponiveis, default=tipos_disponiveis)
 
-# Faixa de preço
-preco_min, preco_max = float(df["preco_venda"].min(skipna=True) or 0), float(df["preco_venda"].max(skipna=True) or 1)
+preco_max_global = float(df["preco_venda"].max(skipna=True) or 1)
 preco_range = st.sidebar.slider(
-    "Preço de venda (R$)",
+    "Preço (R$)",
     min_value=0.0,
-    max_value=preco_max,
-    value=(0.0, preco_max),
+    max_value=preco_max_global,
+    value=(0.0, preco_max_global),
     step=10000.0,
     format="R$ %.0f",
 )
 
-# Faixa de desconto
 desconto_min = st.sidebar.slider("Desconto mínimo (%)", 0, 90, 0, step=5)
 
-# Modalidade
 modalidades_disponiveis = sorted(df["modalidade"].dropna().unique().tolist())
 modalidades = st.sidebar.multiselect("Modalidade", modalidades_disponiveis, default=[])
 
-# Quartos mínimos
+financiamento = st.sidebar.selectbox("Aceita financiamento?", ["Qualquer", "Sim", "Não"])
+
 quartos_min = st.sidebar.selectbox("Quartos (mínimo)", ["Qualquer", "1", "2", "3", "4+"], index=0)
+
 
 # ---------- Aplicar filtros --------------------------------------------------
 
@@ -100,6 +88,8 @@ if desconto_min > 0:
     f = f[f["desconto_pct"].fillna(0) >= desconto_min]
 if modalidades:
     f = f[f["modalidade"].isin(modalidades)]
+if financiamento != "Qualquer":
+    f = f[f["aceita_financiamento"] == financiamento]
 if quartos_min != "Qualquer":
     n = 4 if quartos_min == "4+" else int(quartos_min)
     f = f[f["quartos"].fillna(0) >= n]
@@ -108,23 +98,19 @@ if quartos_min != "Qualquer":
 # ---------- Header & KPIs ----------------------------------------------------
 
 st.title("🏠 Leilões Caixa Econômica Federal")
-st.caption(f"Última atualização dos dados: {DATA_FILE.stat().st_mtime if DATA_FILE.exists() else 'n/a'}")
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Imóveis filtrados", f"{len(f):,}".replace(",", "."))
-c2.metric("Preço mediano", f"R$ {f['preco_venda'].median():,.0f}".replace(",", "."))
-c3.metric("Desconto mediano", f"{f['desconto_pct'].median():.1f}%")
-c4.metric("UFs cobertas", f["uf"].nunique())
+c1.metric("Imóveis", f"{len(f):,}".replace(",", "."))
+c2.metric("Preço mediano", f"R$ {f['preco_venda'].median():,.0f}".replace(",", ".") if f['preco_venda'].notna().any() else "—")
+c3.metric("Desconto mediano", f"{f['desconto_pct'].median():.1f}%" if f['desconto_pct'].notna().any() else "—")
+c4.metric("Cidades", f["cidade"].nunique())
 
 
-# ---------- Tabs: Lista | Mapa | Detalhe -------------------------------------
+# ---------- Tabs -------------------------------------------------------------
 
-tab_lista, tab_mapa, tab_stats = st.tabs(["📋 Lista", "🗺️ Mapa", "📊 Estatísticas"])
+tab_lista, tab_cidades, tab_stats = st.tabs(["📋 Lista", "🏙️ Por cidade", "📊 Estatísticas"])
 
 with tab_lista:
-    st.subheader(f"Lista de imóveis ({len(f)})")
-
-    # Ordenação
     sort_col = st.selectbox(
         "Ordenar por",
         ["desconto_pct", "preco_venda", "valor_avaliacao", "area_m2"],
@@ -146,7 +132,7 @@ with tab_lista:
     cols_display = [c for c in cols_display if c in f_sorted.columns]
 
     st.dataframe(
-        f_sorted[cols_display].head(500),  # limite por performance
+        f_sorted[cols_display].head(500),
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -154,93 +140,72 @@ with tab_lista:
             "valor_avaliacao": st.column_config.NumberColumn("Avaliação (R$)", format="R$ %.0f"),
             "desconto_pct": st.column_config.NumberColumn("Desconto", format="%.1f%%"),
             "area_m2": st.column_config.NumberColumn("Área (m²)", format="%.1f"),
-            "url_detalhe": st.column_config.LinkColumn("Ver no site Caixa", display_text="Abrir 🔗"),
+            "url_detalhe": st.column_config.LinkColumn("Caixa", display_text="🔗"),
         },
     )
 
     if len(f_sorted) > 500:
         st.info(f"A mostrar 500 de {len(f_sorted)} imóveis. Aperta os filtros para ver os restantes.")
 
-    # Drill-down: seleção por ID
+    # Drill-down
     st.divider()
-    st.subheader("🔬 Drill-down — ver detalhes de um imóvel")
+    st.subheader("🔬 Drill-down — detalhes de um imóvel")
     ids_disponiveis = f_sorted["id_imovel"].dropna().head(500).tolist()
     if ids_disponiveis:
-        chosen_id = st.selectbox("Escolhe o ID do imóvel", ids_disponiveis)
+        chosen_id = st.selectbox("Escolhe um imóvel", ids_disponiveis)
         if chosen_id:
             row = f_sorted[f_sorted["id_imovel"] == chosen_id].iloc[0]
             colA, colB = st.columns([1, 2])
             with colA:
                 if row.get("url_foto"):
-                    st.image(row["url_foto"], use_container_width=True)
+                    try:
+                        st.image(row["url_foto"], use_container_width=True)
+                    except Exception:
+                        st.caption("Foto indisponível")
             with colB:
                 st.markdown(f"### {row.get('cidade', '')} — {row.get('bairro', '')}")
                 st.markdown(f"**Endereço:** {row.get('endereco', '—')}")
                 st.markdown(f"**Tipo:** {row.get('tipo_imovel', '—')} • **Quartos:** {row.get('quartos', '—')} • **Área:** {row.get('area_m2', '—')} m²")
-                st.markdown(f"**Preço:** R$ {row.get('preco_venda', 0):,.2f}".replace(",", "."))
-                st.markdown(f"**Avaliação:** R$ {row.get('valor_avaliacao', 0):,.2f}".replace(",", "."))
-                st.markdown(f"**Desconto:** {row.get('desconto_pct', 0):.1f}%")
+                preco = row.get('preco_venda')
+                aval = row.get('valor_avaliacao')
+                desc = row.get('desconto_pct')
+                if preco: st.markdown(f"**Preço:** R$ {preco:,.0f}".replace(",", "."))
+                if aval: st.markdown(f"**Avaliação:** R$ {aval:,.0f}".replace(",", "."))
+                if desc: st.markdown(f"**Desconto:** {desc:.1f}%")
                 st.markdown(f"**Modalidade:** {row.get('modalidade', '—')}")
+                st.markdown(f"**Financiamento:** {row.get('aceita_financiamento', '—')}")
                 st.markdown(f"**Descrição:** {row.get('descricao', '—')}")
                 if row.get("url_detalhe"):
-                    st.link_button("Ver página oficial da Caixa →", row["url_detalhe"])
+                    st.link_button("Ver página oficial Caixa →", row["url_detalhe"])
 
-with tab_mapa:
-    st.subheader("Mapa interativo")
+with tab_cidades:
+    st.subheader("Oportunidades agregadas por cidade")
+    agg = f.groupby(["uf", "cidade"]).agg(
+        n_imoveis=("id_imovel", "count"),
+        preco_mediano=("preco_venda", "median"),
+        desconto_medio=("desconto_pct", "mean"),
+        desconto_max=("desconto_pct", "max"),
+    ).reset_index().sort_values("n_imoveis", ascending=False)
 
-    com_coords = f.dropna(subset=["lat", "lon"])
-    sem_coords = len(f) - len(com_coords)
-    if sem_coords:
-        st.caption(f"⚠️ {sem_coords} imóveis sem coordenadas (CEP não geocodificado).")
-
-    if com_coords.empty:
-        st.info("Não há imóveis com coordenadas para mostrar. Corre o `geocoder.py` primeiro.")
-    else:
-        # Centra no centroide
-        center = [com_coords["lat"].mean(), com_coords["lon"].mean()]
-        m = folium.Map(location=center, zoom_start=5, tiles="OpenStreetMap")
-
-        # Limita marcadores para não rebentar o browser
-        sample = com_coords.head(2000)
-        for _, row in sample.iterrows():
-            popup = folium.Popup(
-                f"""
-                <b>{row.get('cidade', '')} — {row.get('bairro', '')}</b><br>
-                <b>R$ {row.get('preco_venda', 0):,.0f}</b> ({row.get('desconto_pct', 0):.0f}% off)<br>
-                {row.get('tipo_imovel', '')} • {row.get('quartos', '?')} quartos<br>
-                <a href="{row.get('url_detalhe', '#')}" target="_blank">Ver no site Caixa</a>
-                """.replace(",", "."),
-                max_width=300,
-            )
-            folium.CircleMarker(
-                location=[row["lat"], row["lon"]],
-                radius=5,
-                popup=popup,
-                color="#003B5C",
-                fill=True,
-                fillColor="#FF6B35",
-                fillOpacity=0.7,
-            ).add_to(m)
-
-        st_folium(m, use_container_width=True, height=600, returned_objects=[])
-        if len(com_coords) > 2000:
-            st.caption(f"A mostrar 2000 de {len(com_coords)} imóveis. Aperta os filtros para granularidade maior.")
+    st.dataframe(
+        agg.head(200),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "preco_mediano": st.column_config.NumberColumn("Preço mediano", format="R$ %.0f"),
+            "desconto_medio": st.column_config.NumberColumn("Desconto médio", format="%.1f%%"),
+            "desconto_max": st.column_config.NumberColumn("Desconto máx", format="%.1f%%"),
+        },
+    )
 
 with tab_stats:
-    st.subheader("Distribuição de oportunidades")
-
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Imóveis por estado**")
-        por_uf = f.groupby("uf").size().sort_values(ascending=False)
-        st.bar_chart(por_uf)
+        st.bar_chart(f.groupby("uf").size().sort_values(ascending=False))
     with c2:
         st.markdown("**Imóveis por tipo**")
-        por_tipo = f.groupby("tipo_imovel").size().sort_values(ascending=False)
-        st.bar_chart(por_tipo)
+        st.bar_chart(f.groupby("tipo_imovel").size().sort_values(ascending=False))
 
-    st.markdown("**Histograma de preços**")
-    st.bar_chart(f["preco_venda"].dropna().clip(upper=2_000_000), x_label="Preço (R$, capped @ 2M)")
-
-    st.markdown("**Histograma de descontos**")
+    st.markdown("**Distribuição de descontos**")
     st.bar_chart(f["desconto_pct"].dropna(), x_label="Desconto (%)")
