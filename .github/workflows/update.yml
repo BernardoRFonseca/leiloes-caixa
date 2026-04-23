@@ -24,7 +24,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run scraper
-        run: python debug.py
+        run: python scraper.py
 
       - name: Run geocoder
         run: python geocoder.py
