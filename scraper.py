@@ -1,8 +1,5 @@
 """
-Scraper dos imóveis da Caixa Econômica Federal — versão corrigida.
-
-O CSV publicado pela Caixa não tem cabeçalho de colunas — atribuímos nomes
-explicitamente com base na ordem fixa das colunas observada nos ficheiros.
+Scraper dos imóveis da Caixa Econômica Federal — versão final.
 """
 
 from __future__ import annotations
@@ -31,25 +28,24 @@ PHOTO_URL = "https://venda-imoveis.caixa.gov.br/fotos/F{id}21.jpg"
 
 CSV_ENCODING = "latin-1"
 CSV_SEPARATOR = ";"
-# As primeiras 5 linhas são apresentação ("Lista de Imóveis...", "Estado X", etc)
-# A 6ª linha JÁ é dados — o ficheiro NÃO tem nomes de colunas.
+# Apenas a 1ª linha é título ("Lista de Imóveis da Caixa..."), 2ª linha é o cabeçalho real
 CSV_SKIP_ROWS = 1
 
-# Nomes que vamos atribuir às colunas, pela ordem fixa observada
-COLUMN_NAMES = [
-    "id_imovel",         # 0
-    "uf",                # 1
-    "cidade",            # 2
-    "bairro",            # 3
-    "endereco",          # 4
-    "preco_venda",       # 5
-    "valor_avaliacao",   # 6
-    "desconto_pct",      # 7
-    "aceita_financiamento",  # 8 ("Sim"/"Não")
-    "descricao",         # 9
-    "modalidade",        # 10
-    "link",              # 11
-]
+RENAME_MAP = {
+    "N° do imóvel": "id_imovel",
+    "Nº do imóvel": "id_imovel",
+    "UF": "uf",
+    "Cidade": "cidade",
+    "Bairro": "bairro",
+    "Endereço": "endereco",
+    "Preço": "preco_venda",
+    "Valor de avaliação": "valor_avaliacao",
+    "Desconto": "desconto_pct",
+    "Financiamento": "aceita_financiamento",
+    "Descrição": "descricao",
+    "Modalidade de venda": "modalidade",
+    "Link de acesso": "link",
+}
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -98,42 +94,27 @@ def fetch_uf(session: requests.Session, uf: str) -> pd.DataFrame | None:
         return None
 
     try:
-        # header=None → não usar nenhuma linha como cabeçalho
-        # names=COLUMN_NAMES → atribuir nomes explicitamente
-df = pd.read_csv(
+        df = pd.read_csv(
             io.BytesIO(resp.content),
             encoding=CSV_ENCODING,
             sep=CSV_SEPARATOR,
             skiprows=CSV_SKIP_ROWS,
-            header=0,  # a próxima linha é o cabeçalho real
+            header=0,
             dtype=str,
             on_bad_lines="skip",
         )
-        # Renomear colunas: o CSV usa nomes em português, normalizamos
-        df.columns = [c.strip() for c in df.columns]
-        rename_map = {
-            "N° do imóvel": "id_imovel",
-            "Nº do imóvel": "id_imovel",
-            "UF": "uf",
-            "Cidade": "cidade",
-            "Bairro": "bairro",
-            "Endereço": "endereco",
-            "Preço": "preco_venda",
-            "Valor de avaliação": "valor_avaliacao",
-            "Desconto": "desconto_pct",
-            "Financiamento": "aceita_financiamento",
-            "Descrição": "descricao",
-            "Modalidade de venda": "modalidade",
-            "Link de acesso": "link",
-        }
-        df = df.rename(columns=rename_map)
-        # Limpa espaços nos valores string
-        for col in df.columns:
-            if df[col].dtype == object:
-                df[col] = df[col].str.strip()
     except Exception as e:
         log.warning("   Erro a fazer parse do CSV de %s: %s", uf, e)
         return None
+
+    # Normalizar nomes de colunas
+    df.columns = [c.strip() for c in df.columns]
+    df = df.rename(columns=RENAME_MAP)
+
+    # Limpar espaços nos valores string
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].astype(str).str.strip()
 
     df = df.dropna(how="all")
     log.info("   ✓ %s: %d imóveis", uf, len(df))
@@ -164,15 +145,12 @@ def _extract_cep(endereco) -> str | None:
 
 
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
-    # Limpeza de tipos numéricos
     df["preco_venda"] = df["preco_venda"].apply(_clean_money)
     df["valor_avaliacao"] = df["valor_avaliacao"].apply(_clean_money)
     df["desconto_pct"] = df["desconto_pct"].apply(_clean_money)
 
-    # CEP do endereço
     df["cep"] = df["endereco"].apply(_extract_cep)
 
-    # URLs
     df["url_detalhe"] = df["id_imovel"].apply(
         lambda x: DETAIL_URL.format(id=x) if pd.notna(x) else None
     )
@@ -180,7 +158,6 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         lambda x: PHOTO_URL.format(id=x) if pd.notna(x) else None
     )
 
-    # Tipo de imóvel inferido da descrição
     def _tipo(desc):
         if not isinstance(desc, str):
             return "Outro"
@@ -199,27 +176,23 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
 
     df["tipo_imovel"] = df["descricao"].apply(_tipo)
 
-    # Quartos
     def _quartos(desc):
         if not isinstance(desc, str):
             return None
-        m = re.search(r"(\d+)\s*(?:quartos?|qtos?|qts?|dorm)", desc.lower())
+        m = re.search(r"(\d+)\s*(?:quartos?|qtos?|qts?|qto|dorm)", desc.lower())
         return int(m.group(1)) if m else None
 
     df["quartos"] = df["descricao"].apply(_quartos)
 
-    # Área total — tenta apanhar "X.XX de área total" (formato Caixa) ou "X m²"
     def _area(desc):
         if not isinstance(desc, str):
             return None
-        # Formato Caixa: "Terreno, 100.50 de área total, 60.00 de área privativa"
         m = re.search(r"([\d.]+)\s*de\s*[áa]rea\s*total", desc.lower())
         if m:
             try:
                 return float(m.group(1))
             except ValueError:
                 pass
-        # Formato com m²
         m = re.search(r"(\d+[.,]?\d*)\s*m[²2]", desc.lower())
         if m:
             try:
@@ -230,7 +203,6 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
 
     df["area_m2"] = df["descricao"].apply(_area)
 
-    # Reordenação final
     cols = [
         "id_imovel", "uf", "cidade", "bairro", "endereco", "cep",
         "tipo_imovel", "quartos", "area_m2",
@@ -260,6 +232,7 @@ def main():
     log.info("A consolidar %d datasets…", len(frames))
     raw = pd.concat(frames, ignore_index=True)
     log.info("Total bruto: %d linhas, %d colunas", len(raw), len(raw.columns))
+    log.info("Colunas brutas: %s", list(raw.columns))
 
     df = normalize(raw)
     log.info("Após normalização: %d imóveis", len(df))
