@@ -33,7 +33,7 @@ CSV_ENCODING = "latin-1"
 CSV_SEPARATOR = ";"
 # As primeiras 5 linhas são apresentação ("Lista de Imóveis...", "Estado X", etc)
 # A 6ª linha JÁ é dados — o ficheiro NÃO tem nomes de colunas.
-CSV_SKIP_ROWS = 5
+CSV_SKIP_ROWS = 1
 
 # Nomes que vamos atribuir às colunas, pela ordem fixa observada
 COLUMN_NAMES = [
@@ -100,17 +100,37 @@ def fetch_uf(session: requests.Session, uf: str) -> pd.DataFrame | None:
     try:
         # header=None → não usar nenhuma linha como cabeçalho
         # names=COLUMN_NAMES → atribuir nomes explicitamente
-        df = pd.read_csv(
+df = pd.read_csv(
             io.BytesIO(resp.content),
             encoding=CSV_ENCODING,
             sep=CSV_SEPARATOR,
             skiprows=CSV_SKIP_ROWS,
-            header=None,
-            names=COLUMN_NAMES,
-            usecols=range(len(COLUMN_NAMES)),  # ignora colunas extras se existirem
+            header=0,  # a próxima linha é o cabeçalho real
             dtype=str,
             on_bad_lines="skip",
         )
+        # Renomear colunas: o CSV usa nomes em português, normalizamos
+        df.columns = [c.strip() for c in df.columns]
+        rename_map = {
+            "N° do imóvel": "id_imovel",
+            "Nº do imóvel": "id_imovel",
+            "UF": "uf",
+            "Cidade": "cidade",
+            "Bairro": "bairro",
+            "Endereço": "endereco",
+            "Preço": "preco_venda",
+            "Valor de avaliação": "valor_avaliacao",
+            "Desconto": "desconto_pct",
+            "Financiamento": "aceita_financiamento",
+            "Descrição": "descricao",
+            "Modalidade de venda": "modalidade",
+            "Link de acesso": "link",
+        }
+        df = df.rename(columns=rename_map)
+        # Limpa espaços nos valores string
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].str.strip()
     except Exception as e:
         log.warning("   Erro a fazer parse do CSV de %s: %s", uf, e)
         return None
