@@ -157,11 +157,28 @@ with tab_lista:
             row = f_sorted[f_sorted["id_imovel"] == chosen_id].iloc[0]
             colA, colB = st.columns([1, 2])
             with colA:
-                if row.get("url_foto"):
-                    try:
-                        st.image(row["url_foto"], use_container_width=True)
-                    except Exception:
-                        st.caption("Foto indisponível")
+                # As URLs de foto da Caixa precisam de um dígito verificador
+                # que não vem no CSV — pelo que mostramos um placeholder bonito
+                # e deixamos o utilizador ver as fotos reais no site da Caixa.
+                st.markdown(
+                    """
+                    <div style="
+                        background: linear-gradient(135deg, #003B5C 0%, #FF6B35 100%);
+                        border-radius: 12px;
+                        height: 280px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        color: white;
+                        font-size: 4em;
+                        margin-bottom: 1em;
+                    ">🏠</div>
+                    <p style="text-align: center; color: #666; font-size: 0.9em;">
+                        📷 Ver fotos no site oficial da Caixa →
+                    </p>
+                    """,
+                    unsafe_allow_html=True,
+                )
             with colB:
                 st.markdown(f"### {row.get('cidade', '')} — {row.get('bairro', '')}")
                 st.markdown(f"**Endereço:** {row.get('endereco', '—')}")
